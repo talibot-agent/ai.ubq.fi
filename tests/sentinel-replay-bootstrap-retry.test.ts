@@ -98,6 +98,44 @@ const assertHistory = (ledger: SentinelReplayBudgetLedger): void => {
 };
 
 Deno.test({
+  name: "bootstrap retry: chunk owner lookups do not rescan accounting/manifest for every chunk of one capture",
+  ignore: typeof Deno.openKv !== "function",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const kv = await Deno.openKv(":memory:");
+    const manifest = manifestFor(1);
+    const captureId = manifest.capture_id;
+    try {
+      await seedManifest(kv, manifest, true);
+      for (let index = 1; index < 5; index += 1) {
+        await kv.set([...SENTINEL_REPLAY_CHUNK_PREFIX, captureId, index], new Uint8Array(100));
+      }
+      let ownerScanCount = 0;
+      const originalList = kv.list.bind(kv);
+      kv.list = ((selector: Deno.KvListSelector, options?: Deno.KvListOptions) => {
+        if ("prefix" in selector && Array.isArray(selector.prefix) && (selector.prefix[3] === "accounting" || selector.prefix[3] === "manifest")) {
+          ownerScanCount += 1;
+        }
+        return originalList(selector, options);
+      }) as typeof kv.list;
+
+      const ledger = await finishSweep(kv);
+      assert.equal(ledger.bootstrap_complete, true);
+      // Accounting prefix pass seeds the owner cache, so chunk ownership checks for
+      // the five chunks of this capture perform no additional owner prefix scans.
+      // Expect only the dedicated accounting + manifest prefix sweeps (2), not 2 per chunk.
+      assert.ok(ownerScanCount <= 4, `ownerScanCount=${ownerScanCount}`);
+      for (let index = 0; index < 5; index += 1) {
+        assert.ok((await kv.get([...SENTINEL_REPLAY_CHUNK_PREFIX, captureId, index])).value);
+      }
+    } finally {
+      kv.close();
+    }
+  },
+});
+
+Deno.test({
   name: "bootstrap retry: orphan chunks are reclaimed instead of being ignored",
   ignore: typeof Deno.openKv !== "function",
   sanitizeResources: false,
